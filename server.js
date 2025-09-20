@@ -1,7 +1,8 @@
 import { WebSocketServer } from "ws";
 
 // Start WebSocket server on port 8080
-const wss = new WebSocketServer({ port: 8080 });
+const port = process.env.PORT || 8080;
+const wss = new WebSocketServer({ port: port });
 
 console.log("🚀 SOS WebSocket server running on ws://localhost:8080");
 
