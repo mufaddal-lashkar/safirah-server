@@ -1,5 +1,6 @@
-import { User, Incident } from "../models/index.js"
+import { User, Incident, Vote } from "../models/index.js"
 import cloudinary from "../utils/cloudinary.js";
+import mongoose from "mongoose";
 
 export const reportIncident = async (req, res) => {
     try {
@@ -114,32 +115,124 @@ export const reportIncident = async (req, res) => {
 export const fetchIncidents = async (req, res) => {
     try {
         const { type = "all", severity = "all", city, page = 1 } = req.query;
+        const userId = req.user._id;
 
         if (!city) {
             return res.status(400).json({ success: false, message: "City is required in query params." });
         }
 
-        // Base query
-        const query = { "location.city": city };
-
-        if (type !== "all") {
-            query.type = type;
-        }
-        if (severity !== "all") {
-            query.severity = severity;
-        }
-
         const limit = 30;
         const skip = (page - 1) * limit;
 
-        // Fetch incidents with pagination
-        const incidents = await Incident.find(query)
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit)
-            .populate("reporter", "_id fullName profilePic email")
+        // Base match query
+        const matchQuery = { "location.city": city };
+        if (type !== "all") matchQuery.type = type;
+        if (severity !== "all") matchQuery.severity = severity;
 
-        const totalIncidents = await Incident.countDocuments(query);
+        const incidents = await Incident.aggregate([
+            // Filter incidents
+            { $match: matchQuery },
+
+            // Sort and paginate
+            { $sort: { createdAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+
+            // Lookup reporter details
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "reporter",
+                    foreignField: "_id",
+                    as: "reporter",
+                    pipeline: [
+                        { $project: { _id: 1, fullName: 1, profilePic: 1, email: 1 } }
+                    ]
+                }
+            },
+            { $unwind: "$reporter" },
+
+            // Lookup votes for each incident
+            {
+                $lookup: {
+                    from: "votes",
+                    localField: "_id",
+                    foreignField: "incident",
+                    as: "votes"
+                }
+            },
+
+            // Lookup comments count for each incident
+            {
+                $lookup: {
+                    from: "comments",
+                    localField: "_id",
+                    foreignField: "incident",
+                    as: "comments"
+                }
+            },
+
+            // Add computed fields
+            {
+                $addFields: {
+                    commentsCount: { $size: "$comments" },
+                    upvotesCount: {
+                        $size: {
+                            $filter: {
+                                input: "$votes",
+                                as: "v",
+                                cond: { $eq: ["$$v.type", "upvote"] }
+                            }
+                        }
+                    },
+                    downvotesCount: {
+                        $size: {
+                            $filter: {
+                                input: "$votes",
+                                as: "v",
+                                cond: { $eq: ["$$v.type", "downvote"] }
+                            }
+                        }
+                    },
+                    isUpvoted: {
+                        $in: [mongoose.Types.ObjectId.createFromHexString(userId || "000000000000000000000000"), {
+                            $map: {
+                                input: {
+                                    $filter: {
+                                        input: "$votes",
+                                        as: "v",
+                                        cond: { $eq: ["$$v.type", "upvote"] }
+                                    }
+                                },
+                                as: "uv",
+                                in: "$$uv.user"
+                            }
+                        }]
+                    },
+                    isDownvoted: {
+                        $in: [mongoose.Types.ObjectId.createFromHexString(userId || "000000000000000000000000"), {
+                            $map: {
+                                input: {
+                                    $filter: {
+                                        input: "$votes",
+                                        as: "v",
+                                        cond: { $eq: ["$$v.type", "downvote"] }
+                                    }
+                                },
+                                as: "dv",
+                                in: "$$dv.user"
+                            }
+                        }]
+                    },
+                }
+            },
+
+            // Remove heavy arrays
+            { $project: { votes: 0, comments: 0 } }
+        ]);
+
+        // Count total documents for pagination
+        const totalIncidents = await Incident.countDocuments(matchQuery);
         const totalPages = Math.ceil(totalIncidents / limit);
 
         res.status(200).json({
@@ -158,7 +251,51 @@ export const fetchIncidents = async (req, res) => {
     }
 };
 
+export const voteIncident = async (req, res) => {
+    try {
+        const { incidentId } = req.params;
+        const { type } = req.body;
+        const userId = req.user._id;
 
+        if (!["upvote", "downvote"].includes(type)) {
+            return res.status(400).json({ success: false, message: "Invalid vote type." });
+        }
+
+        // Check if the incident exists
+        const incidentExists = await Incident.findById(incidentId);
+        if (!incidentExists) {
+            return res.status(404).json({ success: false, message: "Incident not found." });
+        }
+
+        // Check existing vote
+        const existingVote = await Vote.findOne({ incident: incidentId, user: userId });
+
+        if (!existingVote) {
+            // No vote → create new
+            const newVote = new Vote({ incident: incidentId, user: userId, type });
+            await newVote.save();
+            return res.status(201).json({ success: true, message: `You ${type}d this incident.` });
+        }
+
+        if (existingVote.type === type) {
+            // Same vote → remove (toggle off)
+            await Vote.deleteOne({ _id: existingVote._id });
+            return res.status(200).json({ success: true, message: `${type} removed.` });
+        }
+
+        // Different vote → update it
+        existingVote.type = type;
+        await existingVote.save();
+        return res.status(200).json({ success: true, message: `Changed to ${type}.` });
+
+    } catch (error) {
+        console.error("Error handling vote:", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error while processing vote.",
+        });
+    }
+};
 
 export const deleteIncident = async (req, res) => {
     try {
