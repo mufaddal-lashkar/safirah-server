@@ -360,7 +360,7 @@ export const fetchComments = async (req, res) => {
         }
 
         const comments = await Comment.find({ incident: incidentId })
-            .populate("user", "fullname profilePic")
+            .populate("user", "fullName profilePic")
             .sort({ createdAt: -1 });
 
         res.status(200).json({
