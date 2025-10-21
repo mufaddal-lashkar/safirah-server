@@ -1,4 +1,4 @@
-import { User, Incident, Vote } from "../models/index.js"
+import { User, Incident, Vote, Comment } from "../models/index.js"
 import cloudinary from "../utils/cloudinary.js";
 import mongoose from "mongoose";
 
@@ -304,3 +304,75 @@ export const deleteIncident = async (req, res) => {
 
     }
 }
+
+export const addComment = async (req, res) => {
+    try {
+        const { incidentId } = req.params;
+        const { text } = req.body;
+        const userId = req.user._id;
+
+        if (!text || text.trim() === "") {
+            return res.status(400).json({
+                success: false,
+                message: "Comment text is required.",
+            });
+        }
+
+        // check if incident exists
+        const incident = await Incident.findById(incidentId);
+        if (!incident) {
+            return res.status(404).json({
+                success: false,
+                message: "Incident not found.",
+            });
+        }
+
+        // create comment
+        const comment = await Comment.create({
+            incident: incidentId,
+            user: userId,
+            text: text.trim(),
+        });
+
+        // populate user details for response
+        const populatedComment = await comment.populate("user", "fullName profilePic");
+
+        res.status(201).json({
+            success: true,
+            message: "Comment added successfully.",
+            comment: populatedComment,
+        });
+    } catch (error) {
+        console.error("Error adding comment :: ", error);
+        res.status(500).json({
+            success: false,
+            message: "Server error while adding comment.",
+            error: error.message,
+        });
+    }
+};
+
+export const fetchComments = async (req, res) => {
+    try {
+        const { incidentId } = req.params;
+        if (!incidentId) {
+            return res.status(400).json({ success: false, message: "Incident ID is required."});
+        }
+
+        const comments = await Comment.find({ incident: incidentId })
+            .populate("user", "name profilePic")
+            .sort({ createdAt: -1 });
+
+        res.status(200).json({
+            success: true,
+            count: comments.length,
+            comments,
+        });
+    } catch (error) {
+        console.error("Error fetching comments:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch comments.",
+        });
+    }
+};
